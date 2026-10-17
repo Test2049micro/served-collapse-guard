@@ -22,7 +22,9 @@ from . import __version__
 from .core import DEFAULT_SERVED_FIELDS, PROBE_PROMPT, judge_seats, probe_model
 from .vendors import VendorMap
 
-API_KEY_ENV = ("SERVED_GUARD_API_KEY", "OPENAI_API_KEY", "GATEWAY_API_KEY")
+# Only a purpose-built variable: auto-picking $OPENAI_API_KEY would quietly ship
+# that key to whatever host --endpoint names.
+API_KEY_ENV = ("SERVED_GUARD_API_KEY",)
 
 VERDICT_EXPLANATION = {
     "insufficient-evidence": "not enough evidence to claim a multi-vendor review",
@@ -57,7 +59,7 @@ def _probe_kwargs(args: argparse.Namespace) -> dict:
     headers = {}
     for item in args.header or []:
         if "=" not in item:
-            raise SystemExit(f"--header expects name=value, got {item!r}")
+            raise ValueError(f"--header expects name=value, got {item!r}")
         key, value = item.split("=", 1)
         headers[key] = value
     fields = tuple(args.field) or DEFAULT_SERVED_FIELDS
@@ -67,6 +69,7 @@ def _probe_kwargs(args: argparse.Namespace) -> dict:
         "timeout": args.timeout,
         "max_tokens": args.max_tokens,
         "prompt": args.prompt,
+        "allow_insecure": args.allow_insecure,
         "served_fields": fields,
     }
 
@@ -189,6 +192,8 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--header", action="append", default=[], help="extra header name=value, repeatable")
     common.add_argument("--api-key", help="bearer token; prefer $SERVED_GUARD_API_KEY over the flag")
     common.add_argument("--no-auth", action="store_true", help="send no Authorization header")
+    common.add_argument("--allow-insecure", action="store_true",
+                        help="permit cleartext http to a non-loopback endpoint (not recommended: the key goes in the header)")
     common.add_argument("--vendor-map", help="JSON or TOML file extending the vendor prefix table")
     common.add_argument("--alias", action="append", default=[], help="router alias pattern, repeatable")
     common.add_argument(
@@ -231,6 +236,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 130
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 3
+    except (FileNotFoundError, IsADirectoryError, PermissionError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+    except json.JSONDecodeError as exc:
+        print(f"error: bad JSON in vendor map: {exc}", file=sys.stderr)
         return 3
 
 

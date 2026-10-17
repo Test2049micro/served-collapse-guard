@@ -96,9 +96,12 @@ class VendorMap:
         text = Path(path).read_text(encoding="utf-8")
         data = _parse_mapping(text, str(path))
         vendors = data.get("vendors", data)
-        alias = tuple(data["aliases"]) if isinstance(data.get("aliases"), list) else None
-        merged = list(DEFAULT_VENDORS) + [(k, v) for k, v in vendors.items() if isinstance(v, str)]
-        return cls(merged, alias)
+        extra_alias = tuple(data["aliases"]) if isinstance(data.get("aliases"), list) else ()
+        # aliases extend the built-ins the same way vendors do: a file that adds a
+        # private alias must not silently drop "auto-router/" and start reporting a
+        # router alias as if it were a claimed vendor seat
+        return cls(list(DEFAULT_VENDORS) + [(k, v) for k, v in vendors.items() if isinstance(v, str)],
+                   DEFAULT_ALIAS_PATTERNS + extra_alias)
 
     def with_aliases(self, extra: Iterable[str]) -> "VendorMap":
         """Same vendor table, plus additional router-alias patterns."""
@@ -121,12 +124,18 @@ class VendorMap:
 def _parse_mapping(text: str, name: str) -> dict:
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+    except json.JSONDecodeError as exc:
+        json_error = exc
     try:
         import tomllib  # Python 3.11+
     except ModuleNotFoundError:
-        raise SystemExit(
-            f"{name}: not JSON, and TOML needs Python 3.11+ (or ship the map as JSON)"
-        )
-    return tomllib.loads(text)
+        # a library must not exit the process: the CLI maps this to its usage-error
+        # code, and on 3.9 tomllib simply does not exist
+        raise ValueError(
+            f"{name}: not valid JSON ({json_error}) and TOML needs Python 3.11+ "
+            "-- ship the vendor map as JSON"
+        ) from json_error
+    try:
+        return tomllib.loads(text)
+    except Exception as exc:  # noqa: BLE001 - tomllib raises its own types
+        raise ValueError(f"{name}: neither JSON nor TOML ({exc})") from exc

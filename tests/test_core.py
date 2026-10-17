@@ -114,6 +114,14 @@ class ProbeModelTest(unittest.TestCase):
         r = self._run("gpt-4o-2024-11-20", "gpt-4o", "gpt-4o")
         self.assertFalse(r.collapsed)
 
+    def test_host_port_still_becomes_http_for_loopback(self):
+        self.assertEqual(core.normalize_base("127.0.0.1:8000"),
+                         "http://127.0.0.1:8000/v1/chat/completions")
+
+    def test_public_host_without_scheme_becomes_https(self):
+        self.assertEqual(core.normalize_base("gw.example.com"),
+                         "https://gw.example.com/v1/chat/completions")
+
     def test_strict_names_does_flag_pinned_suffix(self):
         r = self._run("gpt-4o-2024-11-20", "gpt-4o", "gpt-4o", strict_names=True)
         self.assertEqual(r.collapsed_kind, "downgrade")

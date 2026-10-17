@@ -15,9 +15,26 @@ Design rules that the whole tool rests on:
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
+
+
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Redirects are refused rather than followed.
+
+    urllib re-attaches ``Authorization`` to the redirected request, so a gateway
+    answering 302 would hand the key to whatever host it pointed at. For an audit
+    tool that is given arbitrary endpoints, that is an exfiltration path.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+def build_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_RejectRedirects())
 from dataclasses import dataclass, field
 
 from .vendors import VendorMap
@@ -107,19 +124,53 @@ class JudgeReport:
         }
 
 
-def normalize_base(endpoint: str) -> str:
-    """Accept ``host:port``, ``http://host:port``, ``.../v1`` or a full URL."""
+def _is_loopback(url: str) -> bool:
+    host = url.split("://", 1)[-1].split("/", 1)[0].rsplit(":", 1)[0].lower()
+    return host in ("localhost", "::1", "0.0.0.0") or host.startswith("127.")
+
+
+def normalize_base(endpoint: str, *, allow_insecure: bool = False) -> str:
+    """Accept ``host:port``, ``http(s)://host:port``, ``.../v1`` or a full URL.
+
+    Two rules here are about the API key rather than tidiness:
+
+    * a bare host defaults to **https**. Defaulting to http would put the bearer
+      token in clear text on exactly the internet-facing gateways this tool audits;
+      loopback and ``--allow-insecure`` are the only cleartext paths.
+    * userinfo is rejected. ``https://gw.internal@attacker.example/v1`` reads like
+      an internal host and connects to ``attacker.example`` -- with a key attached
+      that is an exfiltration path that looks like a typo.
+    """
     url = (endpoint or "").strip().rstrip("/")
     if not url:
         raise ValueError("endpoint is empty")
     if not url.startswith(("http://", "https://")):
         if ":" not in url and "." not in url:
             raise ValueError(f"endpoint {endpoint!r} is not host:port or a URL")
-        url = f"http://{url}"
+        scheme = "http" if _is_loopback(url) or allow_insecure else "https"
+        url = f"{scheme}://{url}"
+    if not allow_insecure and url.startswith("http://") and not _is_loopback(url):
+        raise ValueError(
+            f"refusing to send credentials over cleartext: {url} "
+            "(use https, or --allow-insecure for a local gateway)"
+        )
+    authority = url.split("://", 1)[1].split("/", 1)[0]
+    if "@" in authority:
+        raise ValueError(f"endpoint must not contain userinfo: {endpoint!r}")
     if url.endswith("completions"):
         return url
     if url.endswith("/v1"):
         return f"{url}/chat/completions"
+    path = url.split("://", 1)[1].split("/", 1)[1] if "/" in url.split("://", 1)[1] else ""
+    if path:
+        # any other base path is a guess waiting to be wrong: /openai could want
+        # /openai/chat/completions or /openai/v1/chat/completions depending on the
+        # gateway, and silently appending one of them produces a probe that talks
+        # to the wrong place
+        raise ValueError(
+            f"endpoint {endpoint!r} has an unrecognised path. Use host:port, "
+            ".../v1, or the full .../chat/completions URL"
+        )
     return f"{url}{COMPLETIONS_PATH}"
 
 
@@ -150,19 +201,33 @@ def extract_served(
     return None, None
 
 
-def _names_compatible(requested: str, served: str) -> bool:
-    """True when served is just a pinned/expanded spelling of the same model.
+_CAPABILITY_WORDS = ("mini", "lite", "small", "nano", "micro", "pro", "max", "turbo",
+                     "preview", "latest", "thinking", "high", "low", "fast")
 
-    Gateways echo ``gpt-4o-2024-11-20`` for a request of ``gpt-4o``. Calling that
-    a downgrade would make the guard cry wolf, so a prefix relation on either
-    side counts as the same model. Use ``--strict-names`` to disable.
+
+def _names_compatible(requested: str, served: str) -> bool:
+    """True when served is only a *version pin* of the requested model.
+
+    Gateways echo ``gpt-4o-2024-11-20`` for a request of ``gpt-4o``, and calling
+    that a downgrade would make the guard cry wolf. Accepting any suffix, though,
+    would call ``gpt-4o`` -> ``gpt-4o-mini`` compatible -- which is exactly the
+    silent capability cut this tool exists to surface. So the extra tail has to
+    look like a date or version number, and must not contain a capability word.
     """
     req, srv = requested.lower(), served.lower()
     if req == srv:
         return True
-    for a, b in ((req, srv), (srv, req)):
-        if b.startswith(a) and (len(b) == len(a) or b[len(a)] in "-_.:"):
-            return True
+    for longer, shorter in ((srv, req), (req, srv)):
+        if not longer.startswith(shorter) or len(longer) == len(shorter):
+            continue
+        if longer[len(shorter)] not in "-_.:":
+            continue
+        tail = longer[len(shorter) + 1:]
+        if not tail or not re.fullmatch(r"[0-9][0-9a-z.\-]*", tail):
+            continue
+        if any(word in tail.replace("-", ".").split(".") for word in _CAPABILITY_WORDS):
+            continue
+        return True
     return False
 
 
@@ -175,9 +240,10 @@ def probe_once(
     timeout: float = 45.0,
     max_tokens: int = 10,
     prompt: str = PROBE_PROMPT,
+    allow_insecure: bool = False,
     served_fields: Sequence[str] = DEFAULT_SERVED_FIELDS,
     requested_fields: Sequence[str] = DEFAULT_REQUESTED_FIELDS,
-    opener: Callable[..., object] = urllib.request.urlopen,
+    opener: Callable[..., object] | None = None,
 ) -> dict:
     body = json.dumps(
         {
@@ -190,11 +256,16 @@ def probe_once(
     if api_key:
         request_headers["Authorization"] = f"Bearer {api_key}"
     request_headers.update(headers or {})
-    request = urllib.request.Request(normalize_base(endpoint), data=body, headers=request_headers)
+    request = urllib.request.Request(normalize_base(endpoint, allow_insecure=allow_insecure),
+                                     data=body, headers=request_headers)
+    if opener is None:
+        opener = build_opener().open
     try:
         with opener(request, timeout=timeout) as response:
             payload = json.loads(response.read())
     except urllib.error.HTTPError as exc:
+        if exc.code in (301, 302, 303, 307, 308):
+            return {"ok": False, "status": exc.code, "served": None, "error": "redirect_refused"}
         return {"ok": False, "status": exc.code, "served": None, "error": f"http_{exc.code}"}
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         return {"ok": False, "status": None, "served": None, "error": type(exc).__name__}
@@ -239,6 +310,10 @@ def probe_model(
             requested_vendor=vendors.vendor_of(model),
         )
     distinct = sorted(set(served_values))
+    # stability means "every sample agreed", not "every sample that happened to
+    # answer agreed": a seat that times out on 2 of 3 probes is not a stable route
+    # and must not be counted as evidence in a judge vote
+    stable = len(distinct) == 1 and len(served_values) == len(results)
     served = served_values[0]
     is_alias = vendors.is_router_alias(model)
     requested_vendor = vendors.vendor_of(model)
@@ -249,7 +324,7 @@ def probe_model(
             requested=model,
             served=served,
             ok=False,
-            stable=len(distinct) == 1,
+            stable=stable,
             vendor=served_vendor,
             requested_vendor="unknown",
             collapsed=None,
@@ -270,7 +345,7 @@ def probe_model(
         requested=model,
         served=served,
         ok=True,
-        stable=len(distinct) == 1,
+        stable=stable,
         vendor=served_vendor,
         requested_vendor=requested_vendor,
         collapsed=collapsed,

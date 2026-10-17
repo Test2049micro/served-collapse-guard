@@ -57,17 +57,19 @@ served-collapse-guard probe --endpoint 127.0.0.1:4000 --json \
 
 # the question a multi-model review actually needs answered
 served-collapse-guard judge --seats claude-sonnet-4-6,gpt-4o,gemini-2-5-pro --endpoint …
-  seat claude-sonnet-4-6        -> claude-sonnet-4-6           vendor=anthropic   stable=y ok
-  seat gpt-4o                   -> gemini-2-5-flash            vendor=google      stable=y COLLAPSE(cross-vendor)
-  seat gemini-2-5-pro           -> gemini-2-5-flash-lite       vendor=google      stable=y COLLAPSE(downgrade)
-
-claimed vendors  3: ['anthropic', 'google', 'openai']
-actual vendors   1: ['google']
-verdict: single-vendor -- fewer than 2 real vendors answered -- the review is not multi-vendor
+#   seat claude-sonnet-4-6        -> gemini-2-5-flash          vendor=google  stable=y COLLAPSE(cross-vendor)
+#   seat gpt-4o                   -> gemini-2-5-flash-lite     vendor=google  stable=y COLLAPSE(cross-vendor)
+#   seat gemini-2-5-pro           -> gemini-2-5-flash-lite     vendor=google  stable=y COLLAPSE(downgrade)
+#
+#   claimed vendors  3: ['anthropic', 'google', 'openai']
+#   actual vendors   1: ['google']
+#   verdict: single-vendor -- fewer than 2 real vendors answered -- the review is not multi-vendor
 ```
 
 Three nominally different vendors collapsed onto one. A "majority vote" between
-those seats was one model answering itself three times.
+those seats was one model answering itself three times. Output lines are commented
+so the block stays copy-pasteable; with two of three seats on their own vendor the
+verdict is `partial-collapse` instead, which is also exit 1.
 
 ### Exit codes
 
@@ -102,11 +104,24 @@ re-explaining a delivered conclusion.
 | `--vendor-map file.json` | registers your private / anonymised pool names. Unmapped names yield `unknown`, never a guess. |
 | `--alias pool-` | router aliases carry no vendor claim, so they can't be a "nominal" seat. |
 | `--samples 3` | a route that varies between samples is flux, not evidence. Unstable seats are excluded and force verdict `insufficient-evidence`. |
+| `--allow-insecure` | cleartext http to a non-loopback endpoint is **refused** (exit 3), because the bearer key rides in the header. Loopback stays http by default; a public host defaults to https |
 | `--strict-names` | `gpt-4o` → `gpt-4o-2024-11-20` is a pinned version, not a downgrade. Lenient by default; strict if you want every spelling change visible. |
 | `--no-auth` / `SERVED_GUARD_API_KEY` | the key is never printed or written to output. |
-| `--endpoint` | accepts `host:port`, `http(s)://host:port`, `…/v1`, or a full completions URL. |
+| `--endpoint` | accepts `host:port`, `http(s)://host:port`, `…/v1`, or a full `…/chat/completions` URL. Any other base path is refused rather than guessed (`/openai` is ambiguous, and guessing produces a probe that talks to the wrong place while reporting "no served field" as if the gateway were at fault). |
 
-`examples/vendors.json` shows the map format.
+`examples/vendors.json` shows the map format. Aliases and vendors in that file
+**extend** the built-ins; they do not replace them.
+
+## What the key is protected from
+
+- redirects are refused, not followed. urllib re-attaches `Authorization` to the
+  redirected request, so a gateway answering 302 would hand the key to whatever it
+  pointed at; `--json` reports `redirect_refused`.
+- `userinfo` in an endpoint is rejected: `https://gw.internal@attacker.example/v1`
+  reads like an internal host and connects to `attacker.example`.
+- the key is read only from `SERVED_GUARD_API_KEY` (or `--api-key`). `$OPENAI_API_KEY`
+  is deliberately **not** picked up: this tool sends requests to an arbitrary
+  `--endpoint`, and quietly borrowing a general-purpose key would ship it there.
 
 ## Limits, stated plainly
 
@@ -114,9 +129,12 @@ re-explaining a delivered conclusion.
   report the *requested* model there. Then every seat looks honest. Treat a
   uniform `metadata.served_model` that always equals the request as suspicious,
   and cross-check with `--field`.
-- **Prefix matching is a heuristic.** `gpt-4o-mini` and `gpt-4o` are the same
-  vendor (correct for de-duplication) but different capability (this is the
-  `downgrade` case, name-based).
+- **Prefix matching is a heuristic.** Vendor classification reads a name prefix
+  table; a new model line needs a table entry or it classifies as `unknown`, which
+  the tool reports as insufficient evidence rather than guessing.
+- **Capability detection is name-based.** `gpt-4o` -> `gpt-4o-mini` is caught
+  because "mini" is a capability word; a gateway that silently swaps in an
+  unlabeled weaker model with a compatible-looking name is invisible to this check.
 - **Probes are billable.** 10 `max_tokens` per sample, small but not free.
 - Vendor classification is a name-prefix table, not a registry. If a vendor
   renames a model line, the table needs a PR.
@@ -124,7 +142,7 @@ re-explaining a delivered conclusion.
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # no dependencies at all
+PYTHONPATH=src python -m unittest discover -s tests -v   # no dependencies at all
 pip install -e ".[dev]" && pytest -q        # same suite via pytest
 ```
 
