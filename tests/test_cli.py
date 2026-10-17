@@ -112,7 +112,7 @@ class EndpointGuardTest(unittest.TestCase):
         buffer = io.StringIO()
         with mock.patch("sys.stderr", new=io.StringIO()) as err:
             with redirect_stdout(buffer):
-                code = cli.main(["probe", "--endpoint", "h:1", "8800"])
+                code = cli.main(["probe", "--endpoint", "h:1", "8123"])
         self.assertEqual(code, 3)
         self.assertIn("looks like an endpoint", err.getvalue())
 
