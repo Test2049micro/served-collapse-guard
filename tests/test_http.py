@@ -26,6 +26,8 @@ class Handler(BaseHTTPRequestHandler):
                 "auth": self.headers.get("Authorization"),
                 "model": body.get("model"),
                 "max_tokens": body.get("max_tokens"),
+                "content_type": self.headers.get("Content-Type"),
+                "custom": self.headers.get("X-Pool"),
             }
         )
         payload = {"model": self.served_model, "metadata": {"served_model": self.served_model}}
@@ -72,13 +74,20 @@ class LiveServerTest(unittest.TestCase):
         probe_once(self.endpoint, "gpt-4o", timeout=5)
         self.assertIsNone(SEEN[0]["auth"])
 
+    def test_key_is_not_written_into_any_reported_field(self):
+        result = probe_once(self.endpoint, "gpt-4o", api_key="sk-should-not-appear", timeout=5)
+        self.assertNotIn("sk-should-not-appear", json.dumps(result))
+
     def test_api_key_is_sent_as_bearer(self):
         probe_once(self.endpoint, "gpt-4o", api_key="sk-test-123", timeout=5)
         self.assertEqual(SEEN[0]["auth"], "Bearer sk-test-123")
 
     def test_extra_header_reaches_the_server(self):
+        # previously asserted only the path, so a header that was never forwarded
+        # would have passed
         probe_once(self.endpoint, "gpt-4o", headers={"X-Pool": "blue"}, timeout=5)
-        self.assertEqual(SEEN[0]["path"], "/v1/chat/completions")
+        self.assertEqual(SEEN[0]["custom"], "blue")
+        self.assertEqual(SEEN[0]["content_type"], "application/json")
 
     def test_stability_over_repeated_samples(self):
         result = probe_model(self.endpoint, "gemini-2-5-flash", samples=3, timeout=5)

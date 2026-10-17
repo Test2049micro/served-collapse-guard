@@ -7,24 +7,33 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        python-version: ["3.9", "3.11", "3.13"]
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # the suite runs against the source tree with no install, so PYTHONPATH is
+      # required: a bare `unittest discover` fails to import the package and the
+      # root conftest.py only helps pytest
       - name: stdlib-only suite
-        run: python -m unittest discover -s tests -v
-      - name: install and pytest
-        if: matrix.python-version == '3.11'
+        run: PYTHONPATH=src python -m unittest discover -s tests -v
+      - name: install and smoke
+        if: matrix.python-version == '3.12'
         run: |
-          pip install -e ".[dev]"
-          pytest -q
-      - name: offline vendor classification smoke
-        if: matrix.python-version == '3.11'
-        run: |
-          served-collapse-guard vendors claude-3-7 gpt-5 auto-router/x unknown-model-9
-          served-collapse-guard probe --endpoint 127.0.0.1:1 gpt-4o --json || [ $? -eq 2 ]
+          pip install -e .
+          served-collapse-guard --version
+          served-collapse-guard vendors claude-3-7 gpt-5 auto-router/x unheard-of-9
+          # a dead endpoint must report insufficient evidence (exit 2), never a pass.
+          # These commands exit non-zero *by contract*, so capture the status instead
+          # of letting `bash -e` treat a correct answer as a failed step.
+          set +e
+          served-collapse-guard probe --endpoint 127.0.0.1:1 --timeout 1 gpt-4o --json > probe.json
+          rc=$?
+          set -e
+          test "$rc" -eq 2
+          python -c "import json; r=json.load(open('probe.json'))[0]; assert r['ok'] is False and r['error'], r"
