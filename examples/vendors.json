@@ -1,0 +1,8 @@
+{
+  "vendors": {
+    "mythos-": "example-lab",
+    "pool-": "example-lab",
+    "internal-": "private-reseller"
+  },
+  "aliases": ["auto-router/", "pool-"]
+}
