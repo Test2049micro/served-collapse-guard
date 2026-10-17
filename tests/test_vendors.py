@@ -10,7 +10,7 @@ class VendorOfTest(unittest.TestCase):
     def test_public_model_names(self):
         v = VendorMap()
         self.assertEqual(v.vendor_of("claude-sonnet-4-6"), "anthropic")
-        self.assertEqual(v.vendor_of("gpt-6-sol"), "openai")
+        self.assertEqual(v.vendor_of("gpt-4o-mini"), "openai")
         self.assertEqual(v.vendor_of("gemini-3-5-flash"), "google")
         self.assertEqual(v.vendor_of("grok-4"), "xai")
         self.assertEqual(v.vendor_of("deepseek-v3"), "deepseek")
