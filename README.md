@@ -39,6 +39,9 @@ Both are reported; only the first destroys vendor de-duplication.
 
 ```bash
 pipx install served-collapse-guard      # or: pip install served-collapse-guard
+
+# Not on PyPI yet (name verified free as of 2026-10-17). Until the first release:
+git clone https://github.com/Test2049micro/served-collapse-guard && cd served-collapse-guard && pipx install .
 ```
 
 ## Usage
